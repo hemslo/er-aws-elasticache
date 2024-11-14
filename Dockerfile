@@ -1,23 +1,58 @@
-FROM registry.access.redhat.com/ubi9/python-311
-ARG POETRY_VERSION
-RUN pip install --upgrade pip && \
-    pip install poetry==$POETRY_VERSION
+FROM quay.io/redhat-services-prod/app-sre-tenant/er-base-cdktf-main/er-base-cdktf-main:cdktf-0.20.9-tf-1.6.6-py-3.11-v0.3.0 AS base
+# keep in sync with pyproject.toml
+LABEL konflux.additional-tags="0.1.0"
 
-# venv configuration
-COPY pyproject.toml poetry.lock ./
-RUN poetry install --no-root
+FROM base AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.5.0@sha256:0e0fb77970aceaa106c1fee7103ec3e4885f6c4289e32a596123af06d2e9db9d /uv /bin/uv
 
-# other project related files
-COPY README.md Makefile ./
+COPY cdktf.json ./
+# Download all necessary CDKTF providers and build the python cdktf modules.
+# The python modules must be stored in the .gen directory because cdktf needs them there.
+RUN cdktf-provider-sync .gen
+
+# Python and UV related variables
+ENV \
+    # compile bytecode for faster startup
+    UV_COMPILE_BYTECODE="true" \
+    # disable uv cache. it doesn't make sense in a container
+    UV_NO_CACHE=true \
+    UV_NO_PROGRESS=true
+
+COPY pyproject.toml uv.lock ./
+# Test lock file is up to date
+RUN uv lock --locked
+# Install dependencies
+RUN uv sync --frozen --no-group dev --no-install-project --python /usr/bin/python3
 
 # the source code
-ARG CODE_ROOT
-COPY $CODE_ROOT ./$CODE_ROOT
-COPY tests ./tests
-RUN poetry install --only-root
+COPY README.md validate_plan.py ./
+COPY er_aws_elasticache ./er_aws_elasticache
+# Sync the project
+RUN uv sync --frozen --no-group dev
 
-# run the Makefile target
-ARG MAKE_TARGET
-ARG TWINE_USERNAME
-ARG TWINE_PASSWORD
-RUN make $MAKE_TARGET
+FROM base AS prod
+# get cdktf providers
+COPY --from=builder ${TF_PLUGIN_CACHE_DIR} ${TF_PLUGIN_CACHE_DIR}
+# get our app with the dependencies
+COPY --from=builder ${APP} ${APP}
+
+ENV \
+    # Use the virtual environment
+    PATH="${APP}/.venv/bin:${PATH}" \
+    # cdktf python modules path
+    PYTHONPATH="$APP/.gen"
+
+FROM prod AS test
+COPY --from=ghcr.io/astral-sh/uv:0.5.0@sha256:0e0fb77970aceaa106c1fee7103ec3e4885f6c4289e32a596123af06d2e9db9d /uv /bin/uv
+
+# install test dependencies
+RUN uv sync --frozen
+
+COPY Makefile ./
+COPY tests ./tests
+
+RUN make test
+
+# Empty /tmp again because the test stage might have created files there, e.g. JSII_RUNTIME_PACKAGE_CACHE_ROOT
+# and we want to run this test image in the dev environment
+RUN rm -rf /tmp/*

@@ -1,38 +1,84 @@
-# python-project-template
+# External Resources Elasticache Module
 
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![PyPI](https://img.shields.io/pypi/v/python-project-template)][pypi-link]
-[![PyPI platforms][pypi-platforms]][pypi-link]
-![PyPI - License](https://img.shields.io/pypi/l/python-project-template)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-This is a template for a Python project. It can be used via GitHub's template feature or by copying and pasting the files into your project.
+External Resources module to provision and manage Elasticache clusters in AWS with app-interface.
 
-## Features
+## Tech stack
 
-- [Poetry](https://python-poetry.org/) for dependency management.
-- [Ruff](https://docs.astral.sh/ruff/) for linting and formatting.
-- Containerized CI/CD tasks.
-- Secure `.gitignore` and `.dockerignore` files.
-- Example code and tests.
+* Terraform CDKTF
+* AWS provider
+* Random provider
+* Python 3.11
+* Pydantic
 
-## Usage
+## Development
 
-1. Create a new GitHub repository using this template.
-1. Replace the dummy project name `python-project-template` with your project name.
+> :warning: **Attention**
+>
+> The CDKTF Python module generation needs at least 12GB of memory and takes around 5 minutes to complete.
 
-   ```bash
-    find . -type d -name .git -prune  -o -type f -exec sed -i "s/python-project-template/your-project-name/g" {} \;
-    git mv python_project_template $PROJECT_PACKAGE
-    find . -type d -name .git -prune  -o -type f -exec sed -i "s/python_project_template/$PROJECT_PACKAGE/g" {} \;
-    ```
+Prepare your lcoal development environment:
 
-1. Replace the dummy python package name `python_project_template` (snake_case!) with your package name.
+```bash
+make dev
+```
 
-   ```bash
-    export PROJECT_PACKAGE=your_project_name # snake_case
-    git mv python_project_template $PROJECT_PACKAGE
-    find . -type d -name .git -prune  -o -type f -exec sed -i "s/python_project_template/$PROJECT_PACKAGE/g" {} \;
-    ```
+See the `Makefile` for more details.
 
-[pypi-link]:                https://pypi.org/project/python-project-template/
-[pypi-platforms]:           https://img.shields.io/pypi/pyversions/python-project-template
+## Debugging
+
+To debug and run the module locally, run the following commands:
+
+```bash
+# setup the environment
+$ export VERSION=$(grep konflux.additional-tags Dockerfile | cut -f2 -d\")
+$ export IMAGE=quay.io/redhat-services-prod/app-sre-tenant/er-aws-elasticache-main/er-aws-elasticache-main:$VERSION
+
+# Get the input file from app-interface
+qontract-cli --config=<CONFIG_TOML> external-resources --provisioner <AWS_ACCOUNT_NAME> --provider elasticache --identifier <IDENTIFIER> get-input > tmp/input.json
+
+# Get the AWS credentials
+$ vault login -method=oidc -address=https://vault.devshift.net
+$ vault kv get \
+    -mount app-sre/ \
+    -field credentials \
+    external-resources/<AWS_ACCOUNT_NAME> > tmp/credentials
+
+# Run the stack
+$ docker run --rm -it \
+    --mount type=bind,source=$PWD/tmp/input.json,target=/inputs/input.json \
+    --mount type=bind,source=$PWD/tmp/credentials,target=/credentials \
+    "$IMAGE"
+```
+
+Get the stack file:
+
+```bash
+docker rm -f erv2 && docker run --name cdktf-debug \
+  --mount type=bind,source=$PWD/tmp/input.json,target=/inputs/input.json \
+  --mount type=bind,source=$PWD/tmp/credentials,target=/credentials  \
+  --entrypoint cdktf \
+  "$IMAGE" \
+  synth --output /tmp/cdktf.out
+
+docker cp cdktf-debug:/tmp/cdktf.out/stacks/CDKTF/cdk.tf.json tmp/cdk.tf.json
+```
+
+Compile the plan:
+
+```bash
+cd tmp/...
+terraform init
+terraform plan -out=plan.out
+terraform show -json plan.out > plan.json
+```
+
+Run the validation:
+
+```bash
+export ER_INPUT_FILE=$PWD/tmp/input.json
+export AWS_SHARED_CREDENTIALS_FILE=$PWD/tmp/credentials
+python validate_plan.py tmp/plan.json
+```
